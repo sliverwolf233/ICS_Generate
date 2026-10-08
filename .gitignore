@@ -1,0 +1,36 @@
+# ------------------------------------------------------------------ builds --
+# Every local build tree: build/, build-mingw/, build-msvc/, build-local/,
+# build-core/, build-ui/, build-<anything>/ (the CMake output directory).
+build*/
+out/
+
+# ---------------------------------------------------------------- binaries --
+*.exe
+*.dll
+*.lib
+*.exp
+*.o
+*.obj
+*.a
+*.res
+*.pdb
+*.ilk
+*.idb
+*.map
+*.log
+
+# --------------------------------------------------------------------- IDE --
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+CMakeUserPresets.json
+
+# ----------------------------------------------------------- test scratch ----
+tmp/
+
+# ------------------------------------------------------------ verification --
+# The independent verification artefacts stay local; the report is committed.
+artifacts/*
+!artifacts/.gitkeep
