@@ -463,7 +463,7 @@ static void test_serialize_exact(void) {
     ics_serialize(&cal, buf, need + 1);
     ok = ok && strstr(buf, "DTSTART:20240506T080000\r\n") != NULL;
     ok = ok && strstr(buf, "DTEND") == NULL;
-    xfree(buf);
+    free(buf);   // buf came from malloc(): MUST NOT be freed with xfree()
 
     // malformed models
     IcsCalendar bad;
@@ -480,6 +480,80 @@ static void test_serialize_exact(void) {
     ics_event_free(&t);
     ics_calendar_free(&cal);
     CHECK("serialisation byte-exact (all-day)", ok);
+}
+
+// 500 characters alternating ; , \n: the escaped form doubles in length and
+// crosses many fold boundaries. Round-trips through save/load and verifies the
+// escaped bytes of the SUMMARY property after unfolding the output.
+static void test_escape_stress_serialize(void) {
+    CreateDirectoryA("build-core", NULL);
+    IcsCalendar cal;
+    ics_calendar_init(&cal);
+    wstr_set(&cal.prodid, L"-//stress//x");
+
+    IcsEvent ev;
+    ics_event_init(&ev);
+    wstr_set(&ev.uid, L"stress-1");
+    dt_zero(&ev.dtstamp);
+    ev.dtstamp.year = 2024; ev.dtstamp.month = 1; ev.dtstamp.day = 1;
+    ev.dtstamp.utc = true;
+    ev.allDay = true;
+    ev.start.year = 2024; ev.start.month = 3; ev.start.day = 4;
+    ev.end.year = 2024; ev.end.month = 3; ev.end.day = 5;
+    wchar_t sum[501];
+    for (int i = 0; i < 500; ++i) {
+        sum[i] = (i % 3 == 0) ? L';' : (i % 3 == 1) ? L',' : L'\n';
+    }
+    sum[500] = 0;
+    wstr_set(&ev.summary, sum);
+    ics_calendar_duplicate(&cal, &ev, false);
+
+    bool ok = ics_save_file(&cal, L"build-core/stress.ics");
+    char* data = NULL;
+    int size = 0;
+    ok = ok && file_read_all(L"build-core/stress.ics", &data, &size);
+
+    // byte level after UNFOLDING: the escaped SUMMARY must contain 167 "\;"
+    // 167 "\," and 166 "\n" (500 alternations of ; , LF). Counting on the folded
+    // form would miss pairs split across a fold boundary ('\' end of line, ';'
+    // starting the continuation), which is legal RFC 5545 folding.
+    char* flat = (char*)malloc((size_t)size + 1);
+    int fn = 0;
+    bool atFold = false;   // the space opening a continuation line is fold padding
+    for (int i = 0; data && i < size; ++i) {
+        if (data[i] == '\r') continue;
+        if (data[i] == '\n') { atFold = true; continue; }
+        if (data[i] == ' ' && atFold) { atFold = false; continue; }
+        atFold = false;
+        flat[fn++] = data[i];
+    }
+    flat[fn] = 0;
+    int semi = 0, comma = 0, newline = 0;
+    for (int i = 0; i + 1 < fn; ++i) {
+        if (flat[i] == '\\' && flat[i + 1] == ';') ++semi;
+        if (flat[i] == '\\' && flat[i + 1] == ',') ++comma;
+        if (flat[i] == '\\' && (flat[i + 1] == 'n' || flat[i + 1] == 'N')) ++newline;
+    }
+    free(flat);
+    ok = ok && semi == 167 && comma == 167 && newline == 166;
+    xfree(data);   // from file_read_all: core heap, xfree is correct here
+
+    // load back: the summary must survive the escape/unfold round trip exactly
+    IcsCalendar back;
+    ics_calendar_init(&back);
+    ok = ok && ics_load_file(&back, L"build-core/stress.ics");
+    ok = ok && back.count == 1 && back.events[0].summary.len == 500;
+    bool sumOk = back.count == 1 && back.events[0].summary.len == 500;
+    for (int i = 0; i < 500 && sumOk; ++i) {
+        wchar_t want = (i % 3 == 0) ? L';' : (i % 3 == 1) ? L',' : L'\n';
+        if (back.events[0].summary.data[i] != want) sumOk = false;
+    }
+    ok = ok && sumOk;
+
+    ics_event_free(&ev);
+    ics_calendar_free(&cal);
+    ics_calendar_free(&back);
+    CHECK("escape stress through serializer (500x ;,LF)", ok);
 }
 
 // independent reference folder operating on an unfolded wide text with '\n'
@@ -1003,6 +1077,7 @@ int main(void) {
     test_serialize_full();
     test_parse_messy();
     test_unknown_tzid_degrades();
+    test_escape_stress_serialize();
     test_save_load_round();
     test_merge();
     test_zones();
