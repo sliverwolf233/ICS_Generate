@@ -47,7 +47,7 @@ static void test_memory(void) {
     xmemmove(buf + 1, buf, 3);          // overlapping forward
     zeroed = zeroed && memcmp(buf, "aabc", 4) == 0;
     xmemmove(buf, buf + 1, 3);          // overlapping backward
-    zeroed = zeroed && memcmp(buf, "abc", 4) == 0;
+    zeroed = zeroed && memcmp(buf, "abc", 3) == 0;   // byte 3 is untouched tail
     zeroed = zeroed && xmemeq("abc", "abc", 3) && !xmemeq("abc", "abd", 3);
     CHECK("xmemzero/xmemcopy/xmemmove/xmemeq", zeroed);
 }
@@ -218,7 +218,7 @@ static void test_dt(void) {
 
     // leap second tolerated on parse, invalid values rejected
     ok = ok && dt_is_valid(&a) && !dt_is_zero(&a);
-    d = a; d.day = 31; ok = ok && !dt_is_valid(&d);
+    d = a; d.month = 4; d.day = 31; ok = ok && !dt_is_valid(&d);
     d = a; d.month = 0; ok = ok && !dt_is_valid(&d);
     d = a; d.second = 60; ok = ok && dt_is_valid(&d);
     DateTime z; dt_zero(&z); ok = ok && dt_is_zero(&z);
@@ -320,7 +320,7 @@ static void test_trigger_rrule(void) {
     ics_trigger_from_minutes(90, buf, 32);
     ok = ok && wcscmp(buf, L"-PT90M") == 0;
     ics_trigger_from_minutes(5, buf, 32);
-    ok = ok && wcscmp(buf, L"PT5M") == 0;
+    ok = ok && wcscmp(buf, L"-PT5M") == 0;   // positive input = before the start
 
     IcsEvent ev;
     ics_event_init(&ev);
@@ -390,6 +390,7 @@ static void test_trigger_rrule(void) {
     ok = ok && weq(ics_class_name(ICS_CLASS_PRIVATE), L"PRIVATE");
     ok = ok && ics_class_parse(L"confidential") == ICS_CLASS_CONFIDENTIAL;
     ics_event_free(&ev);
+    if (!ok) printf("  trigger block failed near the end\n");
     CHECK("trigger/rrule/displays/enums", ok);
 }
 
@@ -651,10 +652,14 @@ static void test_serialize_full(void) {
               memcmp(got, expected.p, (size_t)need) == 0;
     if (!ok) {
         printf("  need=%d expected=%d wrote=%d\n", need, expected.len, wrote);
+        FILE* df = fopen("build-core/got.txt", "wb");
+        if (df) { fwrite(got, 1, (size_t)wrote, df); fclose(df); }
+        df = fopen("build-core/exp.txt", "wb");
+        if (df) { fwrite(expected.p, 1, (size_t)expected.len, df); fclose(df); }
         int n = need < expected.len ? need : expected.len;
-        for (int i = 0; i < (n < 400 ? n : 400); ++i) {
+        for (int i = 0; i < n; ++i) {
             if (got[i] != expected.p[i]) {
-                printf("  first diff at %d: got %.20s expected %.20s\n", i,
+                printf("  first diff at %d: got %.30s expected %.30s\n", i,
                        got + i, expected.p + i);
                 break;
             }
