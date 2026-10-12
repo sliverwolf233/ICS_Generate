@@ -380,15 +380,16 @@ static int ics_num_len(int value) {
     return d;
 }
 
-// "-PT15M" | "-P1D" | "-P1W" | "PT0M"; positive minutes give "PT<n>M".
+// "-PT15M" | "-P1D" | "-P1W"; 0 gives "PT0M". minutesBefore counts minutes
+// BEFORE the event start (RFC 5545: a negative duration triggers before), so
+// any non-zero input yields a '-' prefixed duration.
 int ics_trigger_from_minutes(int minutes, wchar_t* out, int outCap) {
     if (!out || outCap < 8) return -1;
-    bool before = minutes < 0;
-    int mag = before ? -minutes : minutes;
-    int need = 4 + ics_num_len(mag) + (before ? 1 : 0);
+    int mag = minutes < 0 ? -minutes : minutes;
+    int need = 4 + ics_num_len(mag) + (mag > 0 ? 1 : 0);
     if (outCap < need + 1) return -1;
     int n = 0;
-    if (before) out[n++] = L'-';
+    if (mag > 0) out[n++] = L'-';
     out[n++] = L'P';
     if (mag > 0 && mag % 10080 == 0) {
         ics_put_num(out, &n, mag / 10080);
@@ -936,7 +937,7 @@ bool ics_save_file(const IcsCalendar* cal, const wchar_t* path) {
     int need = ics_serialize(cal, NULL, 0);
     if (need < 0) return false;
     char* buf = (char*)xmalloc((size_t)need + 1);
-    int got = ics_serialize(cal, buf, need);
+    int got = ics_serialize(cal, buf, need + 1);   // cap >= required+1 so it is written
     if (got != need) { xfree(buf); return false; }
     bool ok = file_write_all(path, buf, need);
     xfree(buf);
