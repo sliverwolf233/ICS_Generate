@@ -10,16 +10,25 @@
 static int g_pass = 0;
 static int g_fail = 0;
 
+// fflush after every line: CI runs with a fully buffered stdout, and on a
+// crash the buffered PASS lines would be lost (observed in MSYS2 CI run).
+// HeapValidate turns STATUS_HEAP_CORRUPTION (reported at process exit by CI)
+// into an immediate, per-case diagnosis.
 #define CHECK(name, cond)                                              \
     do {                                                               \
         if (cond) { ++g_pass; printf("PASS %s\n", name); }             \
         else { ++g_fail; printf("FAIL %s  (%s:%d)\n", name, __FILE__, __LINE__); } \
+        if (!HeapValidate(GetProcessHeap(), 0, 0)) {                   \
+            ++g_fail; printf("HEAP CORRUPT after %s\n", name);         \
+        }                                                              \
+        fflush(stdout);                                                \
     } while (0)
 
 #define CHECK_MSG(name, cond, msg)                                     \
     do {                                                               \
         if (cond) { ++g_pass; printf("PASS %s\n", name); }             \
         else { ++g_fail; printf("FAIL %s  (%s:%d) %s\n", name, __FILE__, __LINE__, msg); } \
+        fflush(stdout);                                                \
     } while (0)
 
 static bool weqx(const WStr* s, const wchar_t* lit) { return wstr_equals(s, lit); }
@@ -741,6 +750,55 @@ static void test_parse_messy(void) {
     CHECK("tolerant parse of messy calendar", ok);
 }
 
+static void test_unknown_tzid_degrades(void) {
+    CreateDirectoryA("build-core", NULL);
+    IcsCalendar cal;
+    ics_calendar_init(&cal);
+    wstr_set(&cal.prodid, L"-//tz//probe");
+
+    IcsEvent bad;
+    ics_event_init(&bad);
+    wstr_set(&bad.uid, L"mars-1");
+    dt_zero(&bad.dtstamp);
+    bad.dtstamp.year = 2025; bad.dtstamp.month = 1; bad.dtstamp.day = 1;
+    bad.dtstamp.utc = true;
+    bad.timeMode = ICS_TIME_TZID;
+    wstr_set(&bad.tzid, L"Mars/Valles_Marineris");   // not resolvable anywhere
+    bad.start.year = 2025; bad.start.month = 1; bad.start.day = 1;
+    bad.start.hour = 9;
+    bad.end = bad.start; bad.end.hour = 10;
+    wstr_set(&bad.summary, L"ok");
+    ics_calendar_duplicate(&cal, &bad, false);
+
+    int need = ics_serialize(&cal, NULL, 0);
+    char* buf = (char*)malloc((size_t)need + 1);
+    ics_serialize(&cal, buf, need + 1);
+    bool ok = strstr(buf, ";TZID=") == NULL;   // no dangling TZID parameter
+    ok = ok && strstr(buf, "TZID:") == NULL;   // no dangling VTIMEZONE TZID either
+    ok = ok && strstr(buf, "BEGIN:VTIMEZONE") == NULL;
+    ok = ok && strstr(buf, "DTSTART:20250101T090000") != NULL;   // dates survive
+    ok = ok && strstr(buf, "DTEND:20250101T100000") != NULL;
+    ok = ok && strstr(buf, "SUMMARY:ok") != NULL;
+    free(buf);
+
+    // a known IANA alias still resolves and keeps its VTIMEZONE
+    ics_calendar_clear(&cal);
+    wstr_set(&bad.tzid, L"Asia/Shanghai");
+    ics_calendar_duplicate(&cal, &bad, false);
+    need = ics_serialize(&cal, NULL, 0);
+    buf = (char*)malloc((size_t)need + 1);
+    ics_serialize(&cal, buf, need + 1);
+    ok = ok && strstr(buf, "BEGIN:VTIMEZONE") != NULL;
+    ok = ok && strstr(buf, "TZID:Asia/Shanghai") != NULL;
+    ok = ok && strstr(buf, ";TZID=Asia/Shanghai:20250101T090000") != NULL;
+    ok = ok && strstr(buf, ";TZID=Asia/Shanghai:20250101T100000") != NULL;
+    free(buf);
+
+    ics_event_free(&bad);
+    ics_calendar_free(&cal);
+    CHECK("unknown TZID degrades to floating, known alias keeps VTIMEZONE", ok);
+}
+
 static void test_save_load_round(void) {
     CreateDirectoryA("build-core", NULL);
     IcsCalendar cal;
@@ -944,6 +1002,7 @@ int main(void) {
     test_serialize_exact();
     test_serialize_full();
     test_parse_messy();
+    test_unknown_tzid_degrades();
     test_save_load_round();
     test_merge();
     test_zones();
