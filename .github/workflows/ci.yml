@@ -32,12 +32,15 @@ jobs:
           - name: msvc-x64
             toolchain: msvc
             arch: x64
+            devcmd_arch: x64
           - name: msvc-x86
             toolchain: msvc
             arch: Win32
+            devcmd_arch: x86
           - name: mingw-x64
             toolchain: mingw
             arch: x64
+            devcmd_arch: x64
 
     steps:
       - name: Checkout
@@ -72,12 +75,20 @@ jobs:
           & $make --version | Select-Object -First 1
 
       # -------------------------------------------------------------- configure
+      - name: Set up MSVC developer environment (${{ matrix.arch }})
+        if: matrix.toolchain == 'msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.devcmd_arch }}
+
       - name: Configure (MSVC ${{ matrix.arch }})
         if: matrix.toolchain == 'msvc'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }} -DCMAKE_BUILD_TYPE=Release -DICSG_BUILD_TESTS=ON
+          # windows-latest is the windows-2025 image: VS generator detection is
+          # unreliable there, so drive cl/link/rc directly through Ninja.
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DICSG_BUILD_TESTS=ON
           if ($LASTEXITCODE -ne 0) { throw "cmake configure failed with exit code $LASTEXITCODE" }
 
       - name: Configure (MinGW-w64 x64)
