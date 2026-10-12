@@ -78,61 +78,44 @@ extern "C" {
 int _fltused = 0;
 }
 // ------------------------------------------------ x86 64-bit math ----
-// MSVC x86 has no native 64-bit divide; /NODEFAULTLIB links need these CRT
-// helper routines. Compiled only for 32-bit MSVC (x64 and MinGW use native
-// instructions / libgcc), algorithms verified against native operators
-// with 1,000,000 random groups on x64 (see build-ui/_int64_test.cpp).
+// MSVC x86 has no native 64/64 divide; /NODEFAULTLIB links need these CRT
+// helpers. Source-level names carry ONE underscore (_alldiv ...): x86
+// __cdecl decorates exactly one leading underscore, and the compiler-
+// generated calls reference those decorated names directly. x64 and MinGW
+// never see this block. Algorithms verified against native 64-bit
+// operators with 1,000,000 random groups on x64 (build-ui/_int64_test.cpp).
 #if defined(_MSC_VER) && defined(_M_IX86)
-extern "C" {
-// ---- 64-bit helper routines for x86 (MSVC has no native 64/64 divide) ----
-// Implemented with 32-bit-friendly operations only (constant shifts, so the
-// compiler never emits calls to the shift helpers) and no recursion, so the
-// set below is closed: no further CRT symbols are pulled in.
-static unsigned long long x86_shl64(unsigned long long v, int n) {
+// no exports, so the extra local symbols have no visibility effect. ---- x86 64-bit math: C algorithm cores + naked ABI shells ----
+// MSVC x86 emits calls to _alldiv/_allmul/_allrem/_alldvrm/_aulldiv/
+// _aullrem/_aulldvrm (source-level single underscore: x86 __cdecl decorates
+// one leading underscore, so the symbol is exactly the source name).
+// Conventions implemented here (documented MSVC x86 ABI):
+//   _allmul                returns product in EDX:EAX
+//   _alldiv/_aulldiv       returns quotient in EDX:EAX
+//   _allrem/_aullrem       returns remainder in EDX:EAX
+//   _alldvrm               quotient in EDX:EAX, remainder in EBX:ECX
+//   _aulldvrm              quotient in EDX:EAX, remainder in EBX:ECX
+// All args on the stack ([esp+4]=a.lo ... [esp+16]=b.hi), __cdecl caller
+// cleans (ret 16). The naked shells are thin: marshal stack -> call the C
+// core -> place results -> ret 16. The C cores hold all verified logic.
+
+// ---- constant-shift helpers (never emit calls to shift helpers) ----
+static unsigned long long ics_shl64(unsigned long long v, int n) {
     while (n >= 16) { v <<= 16; n -= 16; }
     while (n > 0)   { v <<= 1;  --n; }
     return v;
 }
 
-static unsigned long long x86_shr64(unsigned long long v, int n) {
+static unsigned long long ics_shr64(unsigned long long v, int n) {
     while (n >= 16) { v >>= 16; n -= 16; }
     while (n > 0)   { v >>= 1;  --n; }
     return v;
 }
 
-// Restoring division, one bit per step, MSB first. Requires den < 2^63 so
-// that (r * 2 + next bit) can never overflow; larger divisors are handled
-// explicitly (quotient is 0 or 1). q/r through pointers so __allrem shares
-// one implementation with __alldiv.
-static void x86_udivmod(unsigned long long num, unsigned long long den,
-                        unsigned long long* q, unsigned long long* r) {
-    if (den == 0) { *q = 0; *r = 0; return; }   // defensive: CRT would raise
-    if (num < den) { *q = 0; *r = num; return; }
-    if ((den >> 63) != 0) { *q = 1; *r = num - den; return; }
-    unsigned long long qq = 0;
-    unsigned long long rr = 0;
-    unsigned long long bit = x86_shl64(1ULL, 63);
-    for (int i = 0; i < 64; ++i) {
-        rr = x86_shl64(rr, 1);
-        if (num & bit) rr |= 1;
-        bit = x86_shr64(bit, 1);
-        qq = x86_shl64(qq, 1);
-        if (rr >= den) { rr -= den; qq |= 1; }
-    }
-    *q = qq;
-    *r = rr;
-}
-
-
-struct IcsDvrmS { long long quot; long long rem; };
-struct IcsDvrmU { unsigned long long quot; unsigned long long rem; };
-
-
-
-
-// 64x64 -> 64 multiply from four 32x32 -> 64 products (mod 2^64 wraps exactly
-// like the native operation, so signed inputs need no special case).
-__declspec(noinline) __declspec(noinline) long long __cdecl __allmul(long long a, long long b) {
+// ---- multiply: four 32x32 -> 64 products recombined mod 2^64 ----
+// (wraps exactly like the native operation, so no signed special case; and
+// no 64x64 multiply anywhere, so no recursion into _allmul).
+long long __cdecl ics_mul_ll(long long a, long long b) {
     unsigned long long ua = (unsigned long long)a;
     unsigned long long ub = (unsigned long long)b;
     unsigned int alo = (unsigned int)ua, ahi = (unsigned int)(ua >> 32);
@@ -140,67 +123,181 @@ __declspec(noinline) __declspec(noinline) long long __cdecl __allmul(long long a
     unsigned long long lo    = (unsigned long long)alo * blo;
     unsigned long long cross = (unsigned long long)alo * bhi
                              + (unsigned long long)ahi * blo;
-    return (long long)(lo + x86_shl64(cross, 32));
+    return (long long)(lo + ics_shl64(cross, 32));
 }
 
-__declspec(noinline) __declspec(noinline) long long __cdecl __alldiv(long long a, long long b) {
+// ---- unsigned restoring division, one bit per step, MSB first ----
+// Requires den < 2^63 so (r * 2 + next bit) cannot overflow; bigger divisors
+// have quotient 0 or 1 and are handled explicitly. No 64/64 divide, no
+// variable 64-bit shifts: the helper set stays closed.
+void ics_udivmod_core(unsigned long long num, unsigned long long den,
+                             unsigned long long* q, unsigned long long* r) {
+    if (den == 0) { *q = 0; *r = 0; return; }   // defensive: CRT would raise
+    if (num < den) { *q = 0; *r = num; return; }
+    if ((den >> 63) != 0) { *q = 1; *r = num - den; return; }
+    unsigned long long qq = 0;
+    unsigned long long rr = 0;
+    unsigned long long bit = ics_shl64(1ULL, 63);
+    for (int i = 0; i < 64; ++i) {
+        rr = ics_shl64(rr, 1);
+        if (num & bit) rr |= 1;
+        bit = ics_shr64(bit, 1);
+        qq = ics_shl64(qq, 1);
+        if (rr >= den) { rr -= den; qq |= 1; }
+    }
+    *q = qq;
+    *r = rr;
+}
+
+// ---- signed wrapper: C truncating division, remainder takes a sign ----
+void ics_sdivmod_core(long long a, long long b,
+                             unsigned long long* q, unsigned long long* r) {
     unsigned long long ua = a < 0 ? 0 - (unsigned long long)a : (unsigned long long)a;
     unsigned long long ub = b < 0 ? 0 - (unsigned long long)b : (unsigned long long)b;
-    unsigned long long q, r;
-    x86_udivmod(ua, ub, &q, &r);
-    if ((a < 0) != (b < 0)) q = 0 - q;
-    return (long long)q;
+    ics_udivmod_core(ua, ub, q, r);
+    if ((a < 0) != (b < 0)) *q = 0 - *q;
+    if (a < 0) *r = 0 - *r;
 }
 
-__declspec(noinline) __declspec(noinline) long long __cdecl __allrem(long long a, long long b) {
-    unsigned long long ua = a < 0 ? 0 - (unsigned long long)a : (unsigned long long)a;
-    unsigned long long ub = b < 0 ? 0 - (unsigned long long)b : (unsigned long long)b;
-    unsigned long long q, r;
-    x86_udivmod(ua, ub, &q, &r);
-    if (a < 0) r = 0 - r;   // C truncating division: remainder takes a sign
-    return (long long)r;
+// ---- exported entry points (MSVC x86 ABI) ----
+// The cores live in the same extern "C" block so the naked shells can
+// reference them by their undecorated names in inline asm. This exe has
+extern "C" {
+
+// ---- constant-shift helpers and C cores (see above) ----
+
+// stack layout entering every shell: [esp]=ret, +4 a.lo, +8 a.hi,
+// +12 b.lo, +16 b.hi. The four pushes at [esp+32..] below assume the
+// 16-byte scratch block and the two pointer pushes shown in each shell.
+
+__declspec(naked) void __cdecl _allmul(void) {
+    __asm {
+        push dword ptr [esp+16]
+        push dword ptr [esp+16]
+        push dword ptr [esp+16]
+        push dword ptr [esp+16]
+        call ics_mul_ll            ; product in edx:eax
+        ret 16
+    }
 }
 
-// MSVC x86 ABI: a struct larger than 8 bytes is returned through a hidden
-// sret pointer, which is exactly what the CRT caller of __alldvrm expects
-// (quot at [ptr], rem at [ptr+8]); returning the struct makes MSVC emit that.
-__declspec(noinline) __declspec(noinline) IcsDvrmS __cdecl __alldvrm(long long a, long long b) {
-    IcsDvrmS out;
-    unsigned long long ua = a < 0 ? 0 - (unsigned long long)a : (unsigned long long)a;
-    unsigned long long ub = b < 0 ? 0 - (unsigned long long)b : (unsigned long long)b;
-    unsigned long long q, r;
-    x86_udivmod(ua, ub, &q, &r);
-    if ((a < 0) != (b < 0)) q = 0 - q;
-    if (a < 0) r = 0 - r;
-    out.quot = (long long)q;
-    out.rem  = (long long)r;
-    return out;
+__declspec(naked) void __cdecl _alldiv(void) {
+    __asm {
+        sub  esp, 16               ; scratch: q at [esp], r at [esp+8]
+        lea  eax, [esp+8]
+        push eax                   ; &r
+        lea  eax, [esp+4]
+        push eax                   ; &q
+        push dword ptr [esp+32]    ; a.lo
+        push dword ptr [esp+32]    ; a.hi
+        push dword ptr [esp+32]    ; b.lo
+        push dword ptr [esp+32]    ; b.hi
+        call ics_sdivmod_core
+        mov  eax, [esp+24]         ; quotient -> edx:eax
+        mov  edx, [esp+28]
+        add  esp, 40
+        ret  16
+    }
 }
 
-__declspec(noinline) unsigned __declspec(noinline) long long __cdecl __aulldiv(unsigned long long a,
-                                                          unsigned long long b) {
-    unsigned long long q, r;
-    x86_udivmod(a, b, &q, &r);
-    return q;
+__declspec(naked) void __cdecl _allrem(void) {
+    __asm {
+        sub  esp, 16
+        lea  eax, [esp+8]
+        push eax
+        lea  eax, [esp+4]
+        push eax
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        call ics_sdivmod_core
+        mov  eax, [esp+32]         ; remainder -> edx:eax
+        mov  edx, [esp+36]
+        add  esp, 40
+        ret  16
+    }
 }
 
-__declspec(noinline) unsigned __declspec(noinline) long long __cdecl __aullrem(unsigned long long a,
-                                                          unsigned long long b) {
-    unsigned long long q, r;
-    x86_udivmod(a, b, &q, &r);
-    return r;
+__declspec(naked) void __cdecl _alldvrm(void) {
+    __asm {
+        sub  esp, 16
+        lea  eax, [esp+8]
+        push eax
+        lea  eax, [esp+4]
+        push eax
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        call ics_sdivmod_core
+        mov  ecx, [esp+32]         ; remainder -> ebx:ecx
+        mov  ebx, [esp+36]
+        mov  eax, [esp+24]         ; quotient  -> edx:eax
+        mov  edx, [esp+28]
+        add  esp, 40
+        ret  16
+    }
 }
 
-__declspec(noinline) __declspec(noinline) IcsDvrmU __cdecl __aulldvrm(unsigned long long a,
-                                                 unsigned long long b) {
-    IcsDvrmU out;
-    x86_udivmod(a, b, &out.quot, &out.rem);
-    return out;
+__declspec(naked) void __cdecl _aulldiv(void) {
+    __asm {
+        sub  esp, 16
+        lea  eax, [esp+8]
+        push eax
+        lea  eax, [esp+4]
+        push eax
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        call ics_udivmod_core
+        mov  eax, [esp+24]
+        mov  edx, [esp+28]
+        add  esp, 40
+        ret  16
+    }
 }
 
+__declspec(naked) void __cdecl _aullrem(void) {
+    __asm {
+        sub  esp, 16
+        lea  eax, [esp+8]
+        push eax
+        lea  eax, [esp+4]
+        push eax
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        call ics_udivmod_core
+        mov  eax, [esp+32]
+        mov  edx, [esp+36]
+        add  esp, 40
+        ret  16
+    }
+}
 
-
+__declspec(naked) void __cdecl _aulldvrm(void) {
+    __asm {
+        sub  esp, 16
+        lea  eax, [esp+8]
+        push eax
+        lea  eax, [esp+4]
+        push eax
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        push dword ptr [esp+32]
+        call ics_udivmod_core
+        mov  ecx, [esp+32]
+        mov  ebx, [esp+36]
+        mov  eax, [esp+24]
+        mov  edx, [esp+28]
+        add  esp, 40
+        ret  16
+    }
+}
 
 }  // extern "C"
 #endif  // _MSC_VER && _M_IX86
-
