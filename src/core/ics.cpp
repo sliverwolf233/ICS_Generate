@@ -602,20 +602,37 @@ IcsClass ics_class_parse(const wchar_t* text) {
 
 // ---------------------------------------------------------- serialisation ----
 
+// True when the Windows time zone database resolves the event's TZID (a Windows
+// key or a known IANA alias). RFC 5545 3.2.19 requires every TZID parameter to
+// be defined by a VTIMEZONE; an unresolvable zone therefore degrades the event
+// to floating local time instead of writing a dangling TZID reference.
+static bool ics_tzid_resolvable(const IcsEvent* ev) {
+    const wchar_t* tz = wstr_c(&ev->tzid);
+    if (!tz || !*tz) return false;
+    IcsZoneInfo info;
+    wstr_init(&info.keyName);
+    wstr_init(&info.display);
+    bool ok = ics_zone_find(tz, &info);
+    ics_zone_info_free(&info);
+    return ok;
+}
+
 static void ics_write_dt_value_suffix(WStr* line, const DateTime* d,
-                                      const IcsEvent* ev, bool saveAsUtc) {
+                                      const IcsEvent* ev, bool saveAsUtc, bool tzOk) {
     DateTime v = *d;
     if (ev->allDay) {
         v.dateOnly = true;
         v.utc = false;
         wstr_append(line, L";VALUE=DATE:");
-    } else if (ev->timeMode == ICS_TIME_TZID && !saveAsUtc) {
+    } else if (ev->timeMode == ICS_TIME_TZID && !saveAsUtc && tzOk) {
         wstr_append(line, L";TZID=");
         wstr_append(line, wstr_c(&ev->tzid));
         wstr_append_ch(line, L':');
     } else if (ev->timeMode == ICS_TIME_UTC || saveAsUtc) {
-        if (ev->timeMode == ICS_TIME_TZID && !dt_is_zero(&v)) {
+        if (ev->timeMode == ICS_TIME_TZID && tzOk && !dt_is_zero(&v)) {
             if (!ics_zone_local_to_utc(wstr_c(&ev->tzid), &v)) dt_local_to_utc(&v);
+        } else if (ev->timeMode == ICS_TIME_TZID && !dt_is_zero(&v)) {
+            dt_local_to_utc(&v);   // unknown zone on UTC export: machine zone fallback
         } else if (ev->timeMode == ICS_TIME_FLOAT && saveAsUtc && !dt_is_zero(&v)) {
             dt_local_to_utc(&v);
         }
@@ -629,9 +646,9 @@ static void ics_write_dt_value_suffix(WStr* line, const DateTime* d,
 }
 
 static void ics_write_dt(WStr* line, const wchar_t* name,
-                         const DateTime* d, const IcsEvent* ev, bool saveAsUtc) {
+                         const DateTime* d, const IcsEvent* ev, bool saveAsUtc, bool tzOk) {
     wstr_set(line, name);
-    ics_write_dt_value_suffix(line, d, ev, saveAsUtc);
+    ics_write_dt_value_suffix(line, d, ev, saveAsUtc, tzOk);
 }
 
 static void ics_write_person(WStr* line, const wchar_t* prop,
@@ -670,6 +687,9 @@ static void ics_write_alarm(IcsSink* s, WStr* line, const IcsAlarm* alarm, const
 
 static int ics_write_event(IcsSink* s, WStr* line, const IcsEvent* ev, bool saveAsUtc) {
     if (!dt_is_valid(&ev->start) && !dt_is_zero(&ev->start)) return -1;
+    // RFC 5545 3.2.19: every TZID parameter needs a VTIMEZONE; events whose zone
+    // cannot be resolved degrade to floating time for ALL their date properties.
+    bool tzOk = (ev->timeMode == ICS_TIME_TZID) && ics_tzid_resolvable(ev);
 
     wstr_set(line, L"BEGIN:VEVENT");
     sink_line(s, line);
@@ -713,17 +733,17 @@ static int ics_write_event(IcsSink* s, WStr* line, const IcsEvent* ev, bool save
         sink_line(s, line);
     }
 
-    ics_write_dt(line, L"DTSTART", &ev->start, ev, saveAsUtc);
+    ics_write_dt(line, L"DTSTART", &ev->start, ev, saveAsUtc, tzOk);
     sink_line(s, line);
 
     bool haveEnd = dt_compare(&ev->end, &ev->start) > 0;
     if (ev->allDay && !haveEnd) {
         DateTime e = ev->start;
         dt_add_days(&e, 1);
-        ics_write_dt(line, L"DTEND", &e, ev, saveAsUtc);
+        ics_write_dt(line, L"DTEND", &e, ev, saveAsUtc, tzOk);
         sink_line(s, line);
     } else if (haveEnd) {
-        ics_write_dt(line, L"DTEND", &ev->end, ev, saveAsUtc);
+        ics_write_dt(line, L"DTEND", &ev->end, ev, saveAsUtc, tzOk);
         sink_line(s, line);
     }
     // timed events with end <= start simply omit DTEND.
@@ -796,12 +816,12 @@ static int ics_write_event(IcsSink* s, WStr* line, const IcsEvent* ev, bool save
 
     for (int i = 0; i < ev->exdateCount && i < ICSG_MAX_DATES; ++i) {
         wstr_set(line, L"EXDATE");
-        ics_write_dt_value_suffix(line, &ev->exdates[i], ev, saveAsUtc);
+        ics_write_dt_value_suffix(line, &ev->exdates[i], ev, saveAsUtc, tzOk);
         sink_line(s, line);
     }
     for (int i = 0; i < ev->rdateCount && i < ICSG_MAX_DATES; ++i) {
         wstr_set(line, L"RDATE");
-        ics_write_dt_value_suffix(line, &ev->rdates[i], ev, saveAsUtc);
+        ics_write_dt_value_suffix(line, &ev->rdates[i], ev, saveAsUtc, tzOk);
         sink_line(s, line);
     }
 
