@@ -19,6 +19,12 @@ project(ICS_Generate
         DESCRIPTION "CRT-free Win32 iCalendar (.ics) editor"
         LANGUAGES CXX RC)
 
+# Raise the default Windows SDK target level: MinGW-w64 headers (MSYS2) only
+# declare EnumDynamicTimeZoneInformation and the *Ex dynamic-timezone
+# conversion APIs from _WIN32_WINNT 0x0602 up, and their default is older.
+# Windows 10 / 0x0A00 is the oldest supported host for this application.
+add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
+
 # Single-config generators (MinGW Makefiles, Ninja, NMake) use CMAKE_BUILD_TYPE.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
