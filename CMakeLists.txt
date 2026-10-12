@@ -85,7 +85,7 @@ set(ICSG_TINY_COMPILE_MSVC
 # The default stack reserve/commit is kept: the app must stay usable.
 set(ICSG_TINY_LINK_MSVC
     /LTCG /OPT:REF /OPT:ICF /INCREMENTAL:NO /NODEFAULTLIB /ENTRY:AppEntry
-    /SUBSYSTEM:WINDOWS)
+    /SUBSYSTEM:WINDOWS /MANIFEST:NO)
 
 # --- MinGW/GCC: why each flag is here ---------------------------------------
 #   -std=c++17                  the contract's language level
