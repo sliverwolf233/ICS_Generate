@@ -204,6 +204,18 @@ icsg_apply_tiny_flags(icsg_core)
 #  ICS_Generate - the application
 # ---------------------------------------------------------------------------
 add_executable(ICS_Generate WIN32 ${ICSG_APP_SOURCES} ${ICSG_RC_SOURCES} $<TARGET_OBJECTS:icsg_core>)
+
+# crt_entry.cpp defines memcpy/memset/memmove/memcmp so the image stays
+# CRT-free, but with /GL (whole program optimisation) MSVC rejects user
+# definitions of its predefined library helpers with C2268. Compile just
+# this one file of the ICS_Generate target without /GL: a trailing /GL-
+# overrides the earlier /GL from ICSG_TINY_COMPILE_MSVC (the same override
+# mechanism D9025 reports). icsg_core never contains this file, so the
+# object library keeps full /GL.
+if(MSVC)
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/app/crt_entry.cpp"
+        PROPERTIES COMPILE_FLAGS "/GL-")
+endif()
 target_include_directories(ICS_Generate PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/app"
@@ -231,7 +243,7 @@ if(ICSG_BUILD_TESTS)
     target_include_directories(ics_core_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/core")
     if(MSVC)
         # A static CRT keeps the test runner self-contained on the CI image.
-        target_compile_options(ics_core_tests PRIVATE /utf-8 /std:c++17 /W4 /DNDEBUG)
+        target_compile_options(ics_core_tests PRIVATE /utf-8 /std:c++17 /W4 /DNDEBUG /D_CRT_SECURE_NO_WARNINGS)
         set_property(TARGET ics_core_tests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
     else()
         # -static keeps the runner independent of the MinGW runtime DLLs.
